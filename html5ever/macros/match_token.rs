@@ -99,6 +99,10 @@ matching, by enforcing the following restrictions on its input:
     is common in the HTML5 syntax.
 */
 
+#[path = "utils.rs"]
+mod utils;
+use self::utils::*;
+
 use quote::{ToTokens, Tokens};
 use std::collections::HashSet;
 use std::fs::File;
@@ -106,17 +110,165 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::slice;
 use syn;
+use syn::fold::Fold;
+use proc_macro2::TokenStream;
+use proc_macro2;
 
-pub fn expand_match_tokens(from: &Path, to: &Path) {
+pub fn expand(from: &Path, to: &Path) {
     let mut source = String::new();
     File::open(from).unwrap().read_to_string(&mut source).unwrap();
-    let tts = syn::parse_token_trees(&source).expect("Parsing rules.rs module");
-    let mut tokens = Tokens::new();
-    tokens.append_all(expand_tts(&tts));
-    let code = tokens.to_string().replace("{ ", "{\n").replace(" }", "\n}");
+    let ast = syn::parse_file(&source).expect("Parsing rules.rs module");
+    let mut m = MatchTokenParser {};
+    let ast = m.fold_file(ast);
+    let code = ast.into_tokens().to_string().replace("{ ", "{\n").replace(" }", "\n}");
     File::create(to).unwrap().write_all(code.as_bytes()).unwrap();
 }
 
+struct MatchTokenParser {}
+
+#[derive(Debug)]
+struct MatchToken {
+	expr: syn::Expr,
+	arms: Vec<MatchTokenArm>,
+}
+
+#[derive(Debug)]
+struct MatchTokenArm {
+    lhs: MatchTokenLhs,
+}
+
+#[derive(Debug)]
+struct MatchTokenLhs {
+    binding: Option<syn::Ident>,
+    tags: Vec<Tag>,
+}
+
+// Option is None if wildcard
+#[derive(Debug)]
+pub enum Tag {
+    Opening(Option<syn::Ident>),
+    Closing(Option<syn::Ident>),
+    Pattern(syn::Pat),
+}
+
+impl syn::synom::Synom for Tag {
+    named!(parse -> Self, do_parse!(
+        punct!(<) >>
+        closing: option!(punct!(/)) >>
+        name: alt!(
+            syn!(syn::Ident) => { |i| Some(i) }
+            |
+            punct!(_) => { |_| None }
+        ) >>
+        punct!(>) >>
+        (
+            if closing.is_some() {
+                Tag::Closing(name)
+            } else {
+                Tag::Opening(name)
+            }
+        )
+    ));
+}
+
+impl syn::synom::Synom for MatchTokenLhs {
+    named!(parse -> Self, do_parse!(
+        binding: option!(
+            do_parse!(
+                name: syn!(syn::Ident) >>
+                punct!(@) >>
+                (
+                    name
+                )
+            )
+        ) >>
+        tags: many0!(alt!(
+            syn!(Tag)
+            |
+            syn!(syn::Pat) => { |p| Tag::Pattern(p) }
+        )) >>
+        (
+            MatchTokenLhs {
+                binding,
+                tags
+            }
+        )
+	));
+}
+impl syn::synom::Synom for MatchTokenArm {
+    named!(parse -> Self, do_parse!(
+		lhs: syn!(MatchTokenLhs) >>
+        punct!(=>) >>
+		body: do_parse!(
+    		expr: alt!(expr_nosemi | syn!(syn::Expr)) >>
+    		comma: switch!(value!(arm_expr_requires_comma(&expr)),
+        		true => alt!(
+            		input_end!() => { |_| None }
+            		|
+            		punct!(,) => { Some }
+        		)
+        		|
+        		false => option!(punct!(,))
+    		) >>
+    		(expr, comma)
+		) >>
+        (
+            MatchTokenArm {
+               lhs
+            }
+        )
+    ));
+}
+impl syn::synom::Synom for MatchToken {
+    named!(parse -> Self, do_parse!(
+        expr: syn!(syn::Expr) >>
+        arms: braces!(many0!(MatchTokenArm::parse)) >> (
+            MatchToken {
+                expr,
+                arms: arms.1
+            }
+        )
+    ));
+}
+
+pub fn expand_match_token(body: &TokenStream) -> syn::Expr {
+    println!("{:?}", body.into_tokens().to_string());
+    let match_token = syn::parse2::<MatchToken>(body.clone());
+    println!("{:?}", match_token.unwrap());
+    println!("===================================================================================\n\n");
+	parse_quote!("coucou")
+}
+
+
+impl Fold for MatchTokenParser {
+	fn fold_stmt(&mut self, stmt: syn::Stmt) -> syn::Stmt {
+		match stmt {
+			syn::Stmt::Item(syn::Item::Macro(syn::ItemMacro{ ref mac, .. })) => {
+				if mac.path == parse_quote!(match_token) {
+					return syn::fold::fold_stmt(self, syn::Stmt::Expr(expand_match_token(&mac.tts)))
+				}
+			},
+			_ => {}
+		}
+
+		syn::fold::fold_stmt(self, stmt)
+	}
+
+	fn fold_expr(&mut self, expr: syn::Expr) -> syn::Expr {
+		match expr {
+			syn::Expr::Macro(syn::ExprMacro{ ref mac, .. }) => {
+				if mac.path == parse_quote!(match_token) {
+					return syn::fold::fold_expr(self, expand_match_token(&mac.tts))
+				}
+			},
+			_ => {}
+		}
+
+		syn::fold::fold_expr(self, expr)
+	}
+}
+
+/*
 fn expand_tts(tts: &[syn::TokenTree]) -> Vec<syn::TokenTree> {
     use syn::*;
 
@@ -480,3 +632,4 @@ fn make_tag_pattern(binding: &Tokens, tag: Tag) -> Tokens {
         ::tree_builder::types::TagToken(#binding ::tokenizer::Tag { kind: #kind, #name_field .. })
     }
 }
+*/

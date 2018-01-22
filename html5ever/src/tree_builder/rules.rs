@@ -37,16 +37,11 @@ impl<Handle, Sink> TreeBuilder<Handle, Sink>
         match mode {
             //§ the-initial-insertion-mode
             Initial => match_token!(token {
-                CharacterTokens(NotSplit, text) => SplitWhitespace(text),
-                CharacterTokens(Whitespace, _) => Done,
-                CommentToken(text) => self.append_comment_to_doc(text),
-                token => {
-                    if !self.opts.iframe_srcdoc {
-                        self.unexpected(&token);
-                        self.set_quirks_mode(Quirks);
-                    }
-                    Reprocess(BeforeHtml, token)
-                }
+                <html> <body> => Done,
+                </html> </body> => Done,
+                </_> => Done,
+                tag @ <_> => Done,
+                CharacterTokens(NotSplit, text) => Done,
             }),
 
             //§ the-before-html-insertion-mode
